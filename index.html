@@ -22065,6 +22065,19 @@ service cloud.firestore {
       }
     }
 
+    // Bridge module-scoped globals onto window so the classic (non-module)
+    // <script> blocks further down the page — PWA install/offline banner,
+    // Service Worker controller listener — can see them. A <script
+    // type="module"> has its own private top-level scope; const/function
+    // declarations inside it (store, t, showToast) are NEVER visible to a
+    // separate classic <script> tag, even later in the same document. This
+    // bridge must run after store/t/showToast are defined above and before
+    // any classic script runs (it does — classic scripts execute in source
+    // order after this point).
+    window.store     = store;
+    window.t         = t;
+    window.showToast = showToast;
+
     // Expose render() on window so the Store Proxy can invoke it before the
     // module scope finishes evaluating.
     // Wrap it so PWA banner i18n text stays in sync whenever render() fires
@@ -22526,163 +22539,26 @@ service cloud.firestore {
     (function () {
       if (!('serviceWorker' in navigator)) return;
 
-      // ── SW source code (runs inside the service worker context) ────────────
-      const swCode = `
-        const CACHE_NAME = 'schoolos-v1';
+      // ── Register the Service Worker from a real same-origin file ───────────
+      // navigator.serviceWorker.register() requires an http:/https: same-
+      // origin (or relative) script URL — blob: URLs are rejected by every
+      // browser ("The URL protocol of the script ('blob:...') is not
+      // supported."). The SW source now lives in its own file, sw.js,
+      // deployed at the site root alongside index.html.
+      navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        .then((registration) => {
+          console.log('[SchoolOS SW] Registered. Scope:', registration.scope);
 
-        // The single HTML file we want available offline.
-        const PRECACHE_URLS = ['/'];
-
-        // Firebase API hostnames that always need a live network response.
-        const FIREBASE_HOSTS = [
-          'firestore.googleapis.com',
-          'identitytoolkit.googleapis.com',
-          'securetoken.googleapis.com',
-          'firebase.googleapis.com',
-          'www.googleapis.com',
-        ];
-
-        // ── Install: pre-cache the app shell ─────────────────────────────────
-        self.addEventListener('install', (event) => {
-          event.waitUntil(
-            caches.open(CACHE_NAME).then((cache) => {
-              // cache.add() fetches and stores; ignore failures so a bad
-              // network at install time doesn't block the SW from activating.
-              return cache.addAll(PRECACHE_URLS).catch(() => {});
-            })
-          );
-          // Take control of all clients immediately (skip waiting).
-          self.skipWaiting();
-        });
-
-        // ── Activate: clean up stale caches from old SW versions ─────────────
-        self.addEventListener('activate', (event) => {
-          event.waitUntil(
-            caches.keys().then((keys) =>
-              Promise.all(
-                keys
-                  .filter((key) => key !== CACHE_NAME)
-                  .map((key) => caches.delete(key))
-              )
-            ).then(() => {
-              // Claim all open clients so they use this SW without a page reload.
-              return self.clients.claim();
-            }).then(() => {
-              // Notify all controlled pages that a new version is ready.
-              // The main thread listens for {type:'UPDATE_AVAILABLE'} and shows
-              // the "New version available — Refresh to update" banner.
-              return self.clients.matchAll({ type: 'window' }).then((clientList) => {
-                clientList.forEach((client) => {
-                  client.postMessage({ type: 'UPDATE_AVAILABLE' });
-                });
-              });
-            })
-          );
-        });
-
-        // ── Fetch: routing logic ──────────────────────────────────────────────
-        self.addEventListener('fetch', (event) => {
-          const { request } = event;
-          const url = new URL(request.url);
-
-          // 1. Non-GET requests — always pass through to the network.
-          if (request.method !== 'GET') return;
-
-          // 2. Firebase API calls — network-first, cache fallback.
-          if (FIREBASE_HOSTS.some((host) => url.hostname.includes(host))) {
-            event.respondWith(networkFirst(request));
-            return;
-          }
-
-          // 3. Same-origin requests (the app HTML + relative assets) — cache-first.
-          if (url.origin === self.location.origin) {
-            event.respondWith(cacheFirst(request));
-            return;
-          }
-
-          // 4. All other cross-origin requests (CDN scripts, etc.) — network-only.
-          // Do NOT intercept; let the browser handle them normally.
-        });
-
-        // ── Strategy: cache-first ─────────────────────────────────────────────
-        // Serve from cache immediately; if not cached, fetch from network and
-        // cache the response for next time.
-        async function cacheFirst(request) {
-          const cached = await caches.match(request);
-          if (cached) return cached;
-
-          try {
-            const networkResponse = await fetch(request);
-            if (networkResponse && networkResponse.status === 200 && networkResponse.type !== 'opaque') {
-              const cache = await caches.open(CACHE_NAME);
-              cache.put(request, networkResponse.clone());
+          // Check for updates when the page becomes visible again.
+          document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+              registration.update().catch(() => {});
             }
-            return networkResponse;
-          } catch (_) {
-            // Network failed and nothing in cache — return a minimal offline page.
-            return new Response(
-              '<html><body style="font-family:sans-serif;padding:2rem;text-align:center;">' +
-              '<h2>SchoolOS</h2><p>You are offline. Please reconnect to continue.</p>' +
-              '</body></html>',
-              { headers: { 'Content-Type': 'text/html' } }
-            );
-          }
-        }
-
-        // ── Strategy: network-first ───────────────────────────────────────────
-        // Always try the network first. Fall back to cache if offline.
-        async function networkFirst(request) {
-          try {
-            const networkResponse = await fetch(request);
-            // Cache successful responses for offline fallback.
-            if (networkResponse && networkResponse.status === 200) {
-              const cache = await caches.open(CACHE_NAME);
-              cache.put(request, networkResponse.clone());
-            }
-            return networkResponse;
-          } catch (_) {
-            const cached = await caches.match(request);
-            if (cached) return cached;
-            // Nothing available — let the error surface naturally.
-            return new Response(JSON.stringify({ error: 'offline' }), {
-              status: 503,
-              headers: { 'Content-Type': 'application/json' },
-            });
-          }
-        }
-      `;
-
-      // ── Create a Blob URL from the SW source and register it ───────────────
-      // Using a Blob URL sidesteps the requirement for an external /sw.js file,
-      // keeping SchoolOS a true single-HTML-file app.
-      //
-      // Scope caveat: Blob-URL service workers are scoped to the blob: origin,
-      // not the page origin, so we explicitly pass { scope: '/' } and rely on
-      // the browser allowing it (Chrome/Edge/Firefox all do). Safari 16+ also
-      // supports this. If the browser rejects the scope, the registration
-      // Promise rejects silently — the app continues to work, just without SW.
-      try {
-        const blob  = new Blob([swCode], { type: 'text/javascript' });
-        const swUrl = URL.createObjectURL(blob);
-
-        navigator.serviceWorker.register(swUrl, { scope: '/' })
-          .then((registration) => {
-            console.log('[SchoolOS SW] Registered. Scope:', registration.scope);
-
-            // Check for updates when the page becomes visible again.
-            document.addEventListener('visibilitychange', () => {
-              if (document.visibilityState === 'visible') {
-                registration.update().catch(() => {});
-              }
-            });
-          })
-          .catch((err) => {
-            // Blob-scope rejection or HTTPS-required error — log and continue.
-            console.warn('[SchoolOS SW] Registration failed (non-fatal):', err.message);
           });
-      } catch (err) {
-        console.warn('[SchoolOS SW] Blob creation failed (non-fatal):', err.message);
-      }
+        })
+        .catch((err) => {
+          console.warn('[SchoolOS SW] Registration failed (non-fatal):', err.message);
+        });
     })();
   </script>
 
