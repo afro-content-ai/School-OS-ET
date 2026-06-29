@@ -1,1 +1,88 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .github/workflows/deploy.yml
+#
+# SchoolOS CI/CD — triggered on every push to `main`.
+#
+# Deploys:
+#   1. The static site (index.html) to Netlify via the Netlify CLI.
+#   2. Firestore security rules + composite indexes to Firebase via the
+#      Firebase CLI.
+#
+# Required GitHub Secrets (Settings → Secrets and variables → Actions):
+#
+#   NETLIFY_AUTH_TOKEN
+#     A Netlify personal access token.
+#     Obtain: Netlify UI → User Settings → Applications →
+#             Personal access tokens → New access token.
+#
+#   NETLIFY_SITE_ID
+#     The API ID of your Netlify site (not the subdomain).
+#     Obtain: Netlify UI → Site → Site configuration →
+#             Site details → Site ID  (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
+#
+#   FIREBASE_TOKEN
+#     A long-lived Firebase CI token.
+#     Obtain: on your local machine run:
+#               npx firebase-tools login:ci
+#             Copy the printed token into the secret.
+# ─────────────────────────────────────────────────────────────────────────────
 
+name: Deploy SchoolOS
+
+on:
+  push:
+    branches:
+      - main
+
+  # Allow manual re-runs from the GitHub Actions UI without a code push.
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Node.js ────────────────────────────────────────────────
+      # Node is needed to run both the Netlify CLI and the Firebase CLI.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── 3. Deploy site to Netlify ────────────────────────────────────────
+      # The entire site is a single index.html at the repo root, so we
+      # deploy the root directory (--dir .) without any build step.
+      - name: Install Netlify CLI
+        run: npm install -g netlify-cli@latest
+
+      - name: Deploy to Netlify (production)
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID:    ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          netlify deploy \
+            --prod \
+            --dir . \
+            --message "Deploy from GitHub Actions — ${{ github.sha }}"
+
+      # ── 4. Deploy Firestore rules + indexes to Firebase ──────────────────
+      # Only firestore:rules and firestore:indexes are deployed; Auth
+      # configuration and Hosting (handled by Netlify) are intentionally
+      # excluded.
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools@latest
+
+      - name: Deploy Firestore rules and indexes
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          firebase deploy \
+            --only firestore:rules,firestore:indexes \
+            --token "$FIREBASE_TOKEN" \
+            --non-interactive \
+            --project school-erp-et
