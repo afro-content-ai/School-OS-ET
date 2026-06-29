@@ -1,0 +1,179 @@
+{
+  "indexes": [
+
+    // ── classes/{classKey}/attendance ──────────────────────────────────────
+    // dal.getClassAttendanceRange:
+    //   where('dateKey', '>=', startDateKey) + where('dateKey', '<=', endDateKey)
+    {
+      "collectionGroup": "attendance",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "classKey", "order": "ASCENDING" },
+        { "fieldPath": "dateKey",  "order": "ASCENDING" }
+      ]
+    },
+
+    // ── students/{studentId}/attendance ────────────────────────────────────
+    // dal.getStudentAttendance:
+    //   where('dateKey', '>=', start) + where('dateKey', '<=', end)
+    // dal.subscribeStudentAttendance:
+    //   where('dateKey', '==', todayDateKey)
+    {
+      "collectionGroup": "attendance",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "dateKey",  "order": "ASCENDING" },
+        { "fieldPath": "dateGts",  "order": "ASCENDING" }
+      ]
+    },
+
+    // ── homework/{classKey}/assignments ────────────────────────────────────
+    // dal.listHomework:
+    //   orderBy('createdAt', 'desc') + limit(20)
+    {
+      "collectionGroup": "assignments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "classKey",  "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+
+    // dal.getHomeworkForStudent:
+    //   where('studentIds', 'array-contains', studentId) + limit(10)
+    //   (composite covers future orderBy additions without re-deploy)
+    {
+      "collectionGroup": "assignments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "studentIds", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "createdAt",  "order": "DESCENDING" }
+      ]
+    },
+
+    // ── announcements ──────────────────────────────────────────────────────
+    // dal.subscribeAnnouncements:
+    //   where('createdAt', '>=', semesterStartTimestamp)
+    //   + orderBy('createdAt', 'desc') + limit(20)
+    {
+      "collectionGroup": "announcements",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+
+    // ── examSchedules ──────────────────────────────────────────────────────
+    // dal.subscribeExamSchedules:
+    //   where('ecYear', '==', ecYear) + orderBy('examDateGts', 'asc')
+    {
+      "collectionGroup": "examSchedules",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ecYear",      "order": "ASCENDING" },
+        { "fieldPath": "examDateGts", "order": "ASCENDING" }
+      ]
+    },
+
+    // classKey-scoped exam schedule lookup (teacher view filters by classKey)
+    {
+      "collectionGroup": "examSchedules",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ecYear",      "order": "ASCENDING" },
+        { "fieldPath": "classKey",    "order": "ASCENDING" },
+        { "fieldPath": "examDateGts", "order": "ASCENDING" }
+      ]
+    },
+
+    // ── students (top-level collection) ────────────────────────────────────
+    // dal.listStudents:
+    //   where('currentClassKey', '==', classKey) + limit(60)
+    {
+      "collectionGroup": "students",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "currentClassKey", "order": "ASCENDING" }
+      ]
+    },
+
+    // _rsFetchAllActiveStudents / _rpFetchAllActiveStudents:
+    //   where('status', '==', 'active') + limit(200)
+    //   (client-side filter on currentClassKey suffix afterward)
+    {
+      "collectionGroup": "students",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status",          "order": "ASCENDING" },
+        { "fieldPath": "currentClassKey", "order": "ASCENDING" }
+      ]
+    },
+
+    // ── students/{studentId}/payments ──────────────────────────────────────
+    // dal.listPayments:
+    //   getDocs(collection(db, 'students', sid, 'payments'))
+    //   implicitly ordered; adding createdAt desc for history table
+    {
+      "collectionGroup": "payments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "studentId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+
+    // dal.listAllPayments (admin bulk report):
+    //   where('ecYear', '==', ecYear) + where('semester', '==', semester)
+    {
+      "collectionGroup": "payments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ecYear",    "order": "ASCENDING" },
+        { "fieldPath": "semester",  "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+
+    // ── classes ────────────────────────────────────────────────────────────
+    // dal.listClasses:
+    //   where('ecYear', '==', ecYear)
+    {
+      "collectionGroup": "classes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ecYear", "order": "ASCENDING" }
+      ]
+    },
+
+    // ── users ──────────────────────────────────────────────────────────────
+    // dal.listUsers(role):
+    //   where('role', '==', role)
+    {
+      "collectionGroup": "users",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "role",   "order": "ASCENDING" },
+        { "fieldPath": "active", "order": "ASCENDING" }
+      ]
+    },
+
+    // ── subjects ───────────────────────────────────────────────────────────
+    // dal.listSubjects:
+    //   where('active', '==', true)
+    {
+      "collectionGroup": "subjects",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "active",   "order": "ASCENDING" },
+        { "fieldPath": "minGrade", "order": "ASCENDING" },
+        { "fieldPath": "maxGrade", "order": "ASCENDING" }
+      ]
+    }
+
+    // Collections with only single-doc getDoc() calls — no composite index needed:
+    //   /parentInvites, /promotionJobs, /schoolConfig,
+    //   /students/{sid}/academicYears, /classes/{ck}/gradebooks
+
+  ],
+  "fieldOverrides": []
+}

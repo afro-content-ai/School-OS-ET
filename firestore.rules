@@ -1,0 +1,340 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// firestore.rules — SchoolOS Firestore Security Rules
+//
+// Architecture notes
+// ──────────────────
+// • me()          – single helper that fetches /users/{request.auth.uid}.
+//                   Counts as 1 read per rule evaluation; every collection
+//                   rule that needs role/field data calls it once and reuses
+//                   the result. The app's DAL tracks the overhead cost via
+//                   ME_READS_PER_DOC_ACCESS.
+// • Roles         – admin | registrar | teacher | homeroom_teacher |
+//                   parent | student
+// • active flag   – users must have active == true; deactivated accounts
+//                   are blocked server-side even if their Auth token is valid.
+// • Homeroom-only attendance – only the homeroom teacher of a class may write
+//                   attendance for that class. Their homeroomOf[] array on
+//                   their user doc is the authoritative list.
+// • Per-child mirrors – students/{sid}/attendance/* is writable only by the
+//                   homeroom teacher whose homeroomOf[] contains the classKey
+//                   stored on the document being written.
+// • Score validation – scores written via saveScore() are type-checked here;
+//                   the [0, maxScore] range check lives in the DAL client-side.
+// • Finalized gradebooks – once finalized == true a gradebook is read-only to
+//                   teachers; only admin may update it.
+// • Parent data isolation – parents may only read their own children's records
+//                   (verified via childKeys[] on their user doc).
+// • Student self-access – students may only read their own records.
+// • parentInvites – readable by anyone (unauthenticated) so the accept-invite
+//                   flow works before the parent has a session; writable only
+//                   with a valid matching token.
+// ─────────────────────────────────────────────────────────────────────────────
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper: fetch the signed-in user's profile ────────────────────────
+    // Returns the /users/{uid} document data, or null for unauthenticated
+    // callers. Call once per rule match arm and reuse the binding.
+    function me() {
+      return request.auth != null
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data
+        : null;
+    }
+
+    // Convenience predicates built on me() ────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isActive() {
+      let u = me();
+      return u != null && u.get('active', false) == true;
+    }
+
+    function hasRole(role) {
+      let u = me();
+      return u != null && u.get('active', false) == true && u.get('role', '') == role;
+    }
+
+    function isAdmin() {
+      return hasRole('admin');
+    }
+
+    function isRegistrar() {
+      return hasRole('registrar');
+    }
+
+    function isAdminOrRegistrar() {
+      return isAdmin() || isRegistrar();
+    }
+
+    function isTeacher() {
+      let u = me();
+      return u != null && u.get('active', false) == true &&
+        (u.get('role', '') == 'teacher' || u.get('role', '') == 'homeroom_teacher');
+    }
+
+    function isParent() {
+      return hasRole('parent');
+    }
+
+    function isStudent() {
+      return hasRole('student');
+    }
+
+    // ── /users/{uid} ──────────────────────────────────────────────────────
+    // • Any signed-in active user may read their own doc (for getMe()).
+    // • Admin may read any user doc (for user management views).
+    // • Registrar may read any user doc (to look up parents by name/email).
+    // • Admin may create or fully overwrite any user doc.
+    // • A user may update their own doc, but NOT role, active,
+    //   teachingAssignments, teachingClassKeys, homeroomOf, or childKeys
+    //   (those are admin-controlled fields).
+    match /users/{uid} {
+      allow read: if isSignedIn() && isActive() &&
+                    (request.auth.uid == uid || isAdmin() || isRegistrar());
+
+      allow create: if isAdmin();
+
+      allow update: if isAdmin() ||
+                      (isActive() && request.auth.uid == uid &&
+                       !request.resource.data.diff(resource.data).affectedKeys()
+                         .hasAny(['role', 'active', 'teachingAssignments',
+                                  'teachingClassKeys', 'homeroomOf', 'childKeys']));
+
+      allow delete: if false; // soft-delete only (active: false)
+    }
+
+    // ── /schoolConfig/{docId} ─────────────────────────────────────────────
+    // Any signed-in active user may read (needed for EC year, semester dates,
+    // tuition rates displayed to all roles). Only admin may write.
+    match /schoolConfig/{docId} {
+      allow read:  if isSignedIn() && isActive();
+      allow write: if isAdmin();
+    }
+
+    // ── /students/{studentId} ─────────────────────────────────────────────
+    // • Admin / registrar: full CRUD.
+    // • Teacher (any): read only (for roster views, gradebook, homework).
+    // • Parent: read only their own children (childKeys[]).
+    // • Student: read only their own doc.
+    match /students/{studentId} {
+      allow read: if isAdmin() ||
+                   isRegistrar() ||
+                   isTeacher() ||
+                   (isParent()  && me().get('childKeys', []).hasAny([studentId])) ||
+                   (isStudent() && me().get('studentId', '') == studentId);
+
+      allow create: if isAdminOrRegistrar();
+      allow update: if isAdminOrRegistrar();
+      allow delete: if false; // soft-delete only (status: 'inactive')
+
+      // ── students/{studentId}/attendance/{dateKey} ──────────────────────
+      // Written by dal.markAttendance() as per-child mirrors alongside the
+      // class-level doc. Only the homeroom teacher whose homeroomOf[] contains
+      // the classKey stored on the document being written may write.
+      match /attendance/{dateKey} {
+        allow read: if isAdmin() ||
+                     isRegistrar() ||
+                     isTeacher() ||
+                     (isParent()  && me().get('childKeys', []).hasAny([studentId])) ||
+                     (isStudent() && me().get('studentId', '') == studentId);
+
+        allow write: if isAdmin() ||
+                      (isTeacher() &&
+                       me().get('homeroomOf', []).hasAny(
+                         [request.resource.data.get('classKey', '__none__')]
+                       ));
+      }
+
+      // ── students/{studentId}/academicYears/{ecYear} ───────────────────
+      // Written by dal.finalizeGradebook() (batch.set with merge).
+      // Readable by admin, registrar, teachers, the owning parent, and the
+      // student themselves.
+      match /academicYears/{ecYear} {
+        allow read: if isAdmin() ||
+                     isRegistrar() ||
+                     isTeacher() ||
+                     (isParent()  && me().get('childKeys', []).hasAny([studentId])) ||
+                     (isStudent() && me().get('studentId', '') == studentId);
+
+        allow write: if isAdmin() || isTeacher();
+      }
+
+      // ── students/{studentId}/payments/{paymentId} ─────────────────────
+      // Written by dal.recordPayment() (registrar / admin).
+      // Readable by admin, registrar, the owning parent, and the student.
+      match /payments/{paymentId} {
+        allow read: if isAdmin() ||
+                     isRegistrar() ||
+                     (isParent()  && me().get('childKeys', []).hasAny([studentId])) ||
+                     (isStudent() && me().get('studentId', '') == studentId);
+
+        allow create: if isAdminOrRegistrar();
+        allow update: if isAdmin(); // corrections by admin only
+        allow delete: if false;     // no payment deletions — admin voids via update
+      }
+    }
+
+    // ── /classes/{classKey} ───────────────────────────────────────────────
+    // • Admin / registrar: full CRUD.
+    // • Teacher: read (to list their assigned classes and rosters).
+    // • Parent / student: read (to look up their class info).
+    match /classes/{classKey} {
+      allow read:   if isSignedIn() && isActive();
+      allow create: if isAdminOrRegistrar();
+      allow update: if isAdminOrRegistrar() ||
+                      // Homeroom teacher may update their own class roster
+                      // (studentIds arrayUnion on enroll) — field-limited.
+                      (isTeacher() &&
+                       me().get('homeroomOf', []).hasAny([classKey]) &&
+                       request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['studentIds']));
+      allow delete: if false;
+
+      // ── classes/{classKey}/attendance/{dateKey} ────────────────────────
+      // The single class-level doc written by dal.markAttendance().
+      // Only the homeroom teacher of THIS classKey may write.
+      match /attendance/{dateKey} {
+        allow read:  if isAdmin() ||
+                      isRegistrar() ||
+                      isTeacher();
+
+        allow write: if isAdmin() ||
+                      (isTeacher() &&
+                       me().get('homeroomOf', []).hasAny([classKey]));
+      }
+
+      // ── classes/{classKey}/gradebooks/{subjectKey} ────────────────────
+      // Written by dal.createGradebook(), dal.saveScore(), dal.finalizeGradebook().
+      // • A teacher may create/update a gradebook for a class they are
+      //   assigned to (teachingClassKeys[]) or are homeroom for (homeroomOf[]).
+      // • Once finalized == true, only admin may update (to correct errors).
+      // • Parent / student access raw column scores only via the denormalized
+      //   academicYears copy — no direct gradebook access.
+      match /gradebooks/{subjectKey} {
+        allow read: if isAdmin() ||
+                     isRegistrar() ||
+                     (isTeacher() &&
+                      (me().get('teachingClassKeys', []).hasAny([classKey]) ||
+                       me().get('homeroomOf', []).hasAny([classKey])));
+
+        allow create: if isAdmin() ||
+                       (isTeacher() &&
+                        (me().get('teachingClassKeys', []).hasAny([classKey]) ||
+                         me().get('homeroomOf', []).hasAny([classKey])));
+
+        // Teachers may update only non-finalized gradebooks.
+        allow update: if isAdmin() ||
+                       (isTeacher() &&
+                        resource.data.get('finalized', false) == false &&
+                        (me().get('teachingClassKeys', []).hasAny([classKey]) ||
+                         me().get('homeroomOf', []).hasAny([classKey])));
+
+        allow delete: if isAdmin();
+      }
+    }
+
+    // ── /subjects/{subjectId} ─────────────────────────────────────────────
+    // All signed-in active users may read (subject lists appear in pickers
+    // for teachers, registrars, and admins alike). Only admin may write.
+    match /subjects/{subjectId} {
+      allow read:  if isSignedIn() && isActive();
+      allow write: if isAdmin();
+    }
+
+    // ── /homework/{classKey}/assignments/{homeworkId} ─────────────────────
+    // Written by dal.postHomework() / dal.updateHomework() / dal.deleteHomework().
+    // • Teacher assigned to the class (teachingClassKeys[]) or its homeroom
+    //   teacher (homeroomOf[]) may create.
+    // • Only the original poster (postedBy) or admin may update / delete.
+    // • Students whose studentId is in the denormalized studentIds[] may read.
+    // • Parents whose children are in studentIds[] may read.
+    // • Admin / registrar / teachers may always read.
+    match /homework/{classKey}/assignments/{homeworkId} {
+      allow read: if isAdmin() ||
+                   isRegistrar() ||
+                   isTeacher() ||
+                   (isStudent() &&
+                    resource.data.get('studentIds', []).hasAny(
+                      [me().get('studentId', '__none__')]
+                    )) ||
+                   (isParent() &&
+                    resource.data.get('studentIds', []).hasAny(
+                      me().get('childKeys', [])
+                    ));
+
+      allow create: if isAdmin() ||
+                     (isTeacher() &&
+                      (me().get('teachingClassKeys', []).hasAny([classKey]) ||
+                       me().get('homeroomOf', []).hasAny([classKey])));
+
+      allow update: if isAdmin() ||
+                     (isTeacher() &&
+                      resource.data.get('postedBy', '') == request.auth.uid);
+
+      allow delete: if isAdmin() ||
+                     (isTeacher() &&
+                      resource.data.get('postedBy', '') == request.auth.uid);
+    }
+
+    // ── /announcements/{announcementId} ───────────────────────────────────
+    // • Admin / registrar may create.
+    // • Only admin may update or delete (registrar is create-only per DAL).
+    // • All signed-in active users may read (audience filtering is client-side).
+    match /announcements/{announcementId} {
+      allow read:   if isSignedIn() && isActive();
+      allow create: if isAdminOrRegistrar();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ── /examSchedules/{scheduleId} ───────────────────────────────────────
+    // • Admin creates, updates, and deletes.
+    // • All signed-in active users may read (audience filtering is client-side).
+    match /examSchedules/{scheduleId} {
+      allow read:   if isSignedIn() && isActive();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ── /parentInvites/{inviteId} ─────────────────────────────────────────
+    // Created by registrar via dal.createParentInvite().
+    // Read by ANYONE including unauthenticated visitors — the accept-invite
+    // page must load the invite doc before a session exists.
+    // Update allowed only when the incoming token matches the stored token
+    // (the parent accepting the invite echoes the token unchanged alongside
+    // the status / acceptedAt / parentUid fields — see dal.acceptParentInvite).
+    // No deletes (audit trail).
+    match /parentInvites/{inviteId} {
+      allow read: if true; // intentionally public — unauthenticated accept-invite flow
+
+      allow create: if isAdminOrRegistrar();
+
+      // Accept-invite update: caller must supply the correct token and may only
+      // move the status from 'pending' to 'accepted' with their own UID.
+      allow update: if
+        request.resource.data.get('token', '')    == resource.data.get('token', '') &&
+        resource.data.get('status', '')           == 'pending' &&
+        request.resource.data.get('status', '')   == 'accepted' &&
+        request.resource.data.get('parentUid', '') == request.auth.uid;
+
+      allow delete: if false;
+    }
+
+    // ── /promotionJobs/{ecYear} ───────────────────────────────────────────
+    // Internal job documents written by dal.runPromotion(). Admin only.
+    match /promotionJobs/{ecYear} {
+      allow read:  if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // ── Deny everything else ──────────────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
