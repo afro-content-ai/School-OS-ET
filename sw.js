@@ -3,7 +3,19 @@
 // for navigator.serviceWorker.register()). Deploy this alongside index.html
 // at the site root so it is reachable at /sw.js.
 
-const CACHE_NAME = 'schoolos-v1';
+// CACHE_NAME MUST be bumped on every deploy that changes index.html.
+// 'cacheFirst' below serves whatever is already in this cache WITHOUT ever
+// checking the network if a match exists — so if this string stays the same
+// across deploys, returning users keep getting the OLD index.html forever,
+// no matter how many times the server-side file is updated. Only a changed
+// CACHE_NAME causes 'activate' to delete the old cache (see below) and the
+// next fetch to fall through to the network and store the new file.
+//
+// v2 (this bump): evicts the cached index.html from before window.router was
+// added to the module→window bridge — that pre-fix HTML was cache-first
+// served indefinitely regardless of new deploys, which is why the router
+// ReferenceError persisted after the source fix was already live on Netlify.
+const CACHE_NAME = 'schoolos-v2';
 
 // The single HTML file we want available offline.
 const PRECACHE_URLS = ['/'];
@@ -69,7 +81,20 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 3. Same-origin requests (the app HTML + relative assets) — cache-first.
+  // 3a. HTML navigations — the single index.html IS the entire app, so a
+  //     stale cached copy means a stale app (this is exactly what caused the
+  //     router ReferenceError to persist across deploys: cache-first served
+  //     the pre-fix HTML indefinitely, never re-checking the network).
+  //     Network-first here means returning users always get the latest
+  //     deploy when online, and still get something usable when offline.
+  if (request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {
+    event.respondWith(networkFirst(request));
+    return;
+  }
+
+  // 3b. Other same-origin requests (icons, manifest, fonts) — cache-first is
+  //     fine here: these are fingerprint-cacheable static assets, not the
+  //     app shell itself.
   if (url.origin === self.location.origin) {
     event.respondWith(cacheFirst(request));
     return;
