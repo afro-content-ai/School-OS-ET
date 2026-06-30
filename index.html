@@ -22065,18 +22065,45 @@ service cloud.firestore {
       }
     }
 
-    // Bridge module-scoped globals onto window so the classic (non-module)
-    // <script> blocks further down the page — PWA install/offline banner,
-    // Service Worker controller listener — can see them. A <script
-    // type="module"> has its own private top-level scope; const/function
-    // declarations inside it (store, t, showToast) are NEVER visible to a
-    // separate classic <script> tag, even later in the same document. This
-    // bridge must run after store/t/showToast are defined above and before
-    // any classic script runs (it does — classic scripts execute in source
-    // order after this point).
+    // Bridge module-scoped globals onto window for two distinct reasons:
+    //
+    // (A) Classic <script> blocks further down the page (PWA install/offline
+    //     banner, Service Worker controller listener) cannot see module-scoped
+    //     const/function declarations at all.  A <script type="module"> has
+    //     its own private top-level scope — declarations inside it are NEVER
+    //     visible to a separate classic <script> tag, even later in the same
+    //     document.
+    //
+    // (B) Inline HTML event attributes — onclick="...", onchange="..." etc. —
+    //     are evaluated in the global (window) scope by the browser, regardless
+    //     of where the HTML string was produced.  When a render function builds
+    //     a template string such as:
+    //
+    //       `<button onclick="router.navigate('#/foo')">…</button>`
+    //
+    //     …and that string is written to innerHTML, the browser wires the
+    //     onclick as:
+    //
+    //       element.onclick = new Function('event', 'router.navigate(\'#/foo\')')
+    //
+    //     That anonymous function executes in window scope.  If `router` is
+    //     not a property of window the lookup fails with:
+    //
+    //       ReferenceError: router is not defined
+    //
+    //     This is the root cause of the production incident.  The fix is to
+    //     assign window.router here — once — immediately after `router` is
+    //     fully constructed.  No other change is needed anywhere else.
+    //
+    // This bridge must run after all bridged objects are fully defined and
+    // before any classic script or inline handler runs (it does — classic
+    // scripts execute in document-source order and no inline handlers fire
+    // until the user interacts with the rendered page).
     window.store     = store;
     window.t         = t;
     window.showToast = showToast;
+    window.router    = router;    // Required: inline onclick="router.navigate(…)" handlers
+                                  // evaluate in window scope and need window.router.
 
     // Expose render() on window so the Store Proxy can invoke it before the
     // module scope finishes evaluating.
@@ -22130,8 +22157,11 @@ service cloud.firestore {
         EC:     typeof EC     !== 'undefined' && !!EC,
         dal:    typeof dal    !== 'undefined' && !!dal,
         store:  typeof store  !== 'undefined' && !!store,
-        router: typeof router !== 'undefined' && !!router,
-        t:      typeof t      === 'function',
+        router:        typeof router !== 'undefined' && !!router,
+        // window.router is separately required: inline onclick="router.navigate(…)"
+        // handlers evaluate in window scope, not module scope. The bridge above sets it.
+        'window.router': !!window.router && typeof window.router.navigate === 'function',
+        t:             typeof t      === 'function',
       };
       const missing = Object.keys(requiredGlobals).filter(k => !requiredGlobals[k]);
       if (missing.length === 0) {
