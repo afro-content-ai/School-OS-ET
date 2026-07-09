@@ -16,14 +16,24 @@
 // served indefinitely regardless of new deploys, which is why the router
 // ReferenceError persisted after the source fix was already live on Netlify.
 //
-// v2.1 (this bump): evicts the cached index.html from before the
-// `store is not defined` fix in the PWA install/offline-banner script (that
-// script is a classic <script>, not a module, so it ran synchronously before
+// v2.1: evicts the cached index.html from before the `store is not
+// defined` fix in the PWA install/offline-banner script (that script is a
+// classic <script>, not a module, so it ran synchronously before
 // `window.store` existed — same root cause as the v2 router bug, different
 // line). Without this bump, returning users keep the pre-fix HTML serving
 // from cache-first navigation and the crash will appear to "come back" even
 // though the source on Netlify is already correct.
-const CACHE_NAME = 'schoolos-v2.2';
+//
+// v2.2 (this bump): evicts the cached index.html from before the mobile
+// nav fix — buildBottomNav() previously hard-sliced to the first 5 role
+// items with no way to reach the rest (e.g. Exam Schedule / Announcements
+// for teacher & student roles) short of switching to desktop view. Added a
+// hamburger + bottom-nav "More" entry that open the sidebar drawer, which
+// always lists the full, unsliced item set. Navigations already go
+// network-first (see below), so this bump isn't required for the new HTML
+// to load, but it forces the offline-fallback cache to refresh too and
+// triggers the "update available" banner for anyone with the PWA open.
+const CACHE_NAME = 'schoolos-v2.3';
 
 // The single HTML file we want available offline.
 const PRECACHE_URLS = ['/'];

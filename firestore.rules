@@ -243,23 +243,26 @@ service cloud.firestore {
       // • Parent / student access raw column scores only via the denormalized
       //   academicYears copy — no direct gradebook access.
       match /gradebooks/{subjectKey} {
+        // Matches teacherGradebookView()'s own client-side 403 guard exactly:
+        // teachingAssignments must contain the 'classKey|subjectKey' composite.
+        // teachingClassKeys/homeroomOf alone are class-level only — being
+        // homeroom teacher of a class, or generally assigned to it, doesn't
+        // mean you teach every subject in it, and the UI itself never lets a
+        // teacher reach a gradebook they aren't specifically assigned to teach.
         allow read: if isAdmin() ||
                      isRegistrar() ||
                      (isTeacher() &&
-                      (me().get('teachingClassKeys', []).hasAny([classKey]) ||
-                       me().get('homeroomOf', []).hasAny([classKey])));
+                      me().get('teachingAssignments', []).hasAny([classKey + '|' + subjectKey]));
 
         allow create: if isAdmin() ||
                        (isTeacher() &&
-                        (me().get('teachingClassKeys', []).hasAny([classKey]) ||
-                         me().get('homeroomOf', []).hasAny([classKey])));
+                        me().get('teachingAssignments', []).hasAny([classKey + '|' + subjectKey]));
 
         // Teachers may update only non-finalized gradebooks.
         allow update: if isAdmin() ||
                        (isTeacher() &&
                         resource.data.get('finalized', false) == false &&
-                        (me().get('teachingClassKeys', []).hasAny([classKey]) ||
-                         me().get('homeroomOf', []).hasAny([classKey])));
+                        me().get('teachingAssignments', []).hasAny([classKey + '|' + subjectKey]));
 
         allow delete: if isAdmin();
       }
