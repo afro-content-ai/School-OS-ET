@@ -48,7 +48,29 @@
 // again, online or offline. Bumping CACHE_NAME also means existing installs
 // pick up this new caching rule instead of running forever on the old SW
 // that never intercepted these requests.
-const CACHE_NAME = 'schoolos-v2.4';
+//
+// v2.5 (this bump): networkFirst() used to await fetch() with no timeout.
+// Fully offline, that's fine — fetch() rejects almost instantly and we
+// fall back to cache. But on a slow/degraded connection (e.g. Ethiopian
+// mobile data without a VPN), the browser will happily wait tens of
+// seconds — or longer — for a response that may never come, and both
+// navigations (rule 3a) and Firebase API calls (rule 2a) go through
+// networkFirst(). That hang IS the whole app: blank screen, no error,
+// nothing the user can do but wait or force-quit. That's exactly the
+// "works offline, hangs when online-but-slow" symptom. Fix: race the
+// fetch against NETWORK_TIMEOUT_MS and fall back to cache if the network
+// hasn't answered in time. The real fetch keeps running in the
+// background and still updates the cache if/when it completes, so this
+// only changes behavior when the connection is too slow to be usable
+// anyway.
+const CACHE_NAME = 'schoolos-v2.5';
+
+// How long networkFirst() waits for the network before falling back to
+// cache. Generous enough for a normal round-trip, short enough that a
+// stalled connection doesn't read as a hang. The fallback cache read
+// itself is effectively instant, so tune this down if 5s still feels
+// slow in the field.
+const NETWORK_TIMEOUT_MS = 5000;
 
 // Firebase JS SDK — version-pinned CDN URLs (the version number is in the
 // path), so whatever loaded successfully once is valid forever for that
@@ -187,21 +209,41 @@ async function cacheFirst(request) {
   }
 }
 
-// ── Strategy: network-first ───────────────────────────────────────────
-// Always try the network first. Fall back to cache if offline.
+// ── Strategy: network-first, with a timeout fallback to cache ─────────
+// Try the network so a working connection always gets the freshest
+// deploy. If it hasn't answered within NETWORK_TIMEOUT_MS, stop waiting
+// and serve whatever's cached instead — the network request is left
+// running in the background and still populates the cache if/when it
+// eventually finishes, so THIS load doesn't wait for it but the NEXT one
+// benefits.
 async function networkFirst(request) {
-  try {
-    const networkResponse = await fetch(request);
-    // Cache successful responses for offline fallback.
+  const networkPromise = fetch(request).then((networkResponse) => {
     if (networkResponse && networkResponse.status === 200) {
-      const cache = await caches.open(CACHE_NAME);
-      cache.put(request, networkResponse.clone());
+      caches.open(CACHE_NAME).then((cache) => cache.put(request, networkResponse.clone()));
     }
     return networkResponse;
+  });
+  // Defensively mark this handled now so a rejection that surfaces after
+  // we've stopped waiting on it (timeout case, below) never shows up as
+  // an unhandled promise rejection in the console.
+  networkPromise.catch(() => {});
+
+  const TIMED_OUT = Symbol('timeout');
+  const result = await Promise.race([
+    networkPromise.catch(() => TIMED_OUT), // a real network error also falls back to cache
+    new Promise((resolve) => setTimeout(() => resolve(TIMED_OUT), NETWORK_TIMEOUT_MS)),
+  ]);
+
+  if (result !== TIMED_OUT) return result; // network answered in time
+
+  const cached = await caches.match(request);
+  if (cached) return cached;
+
+  // Nothing cached (e.g. the very first visit, on a bad connection) —
+  // this is the one case left where we have to wait the network out.
+  try {
+    return await networkPromise;
   } catch (_) {
-    const cached = await caches.match(request);
-    if (cached) return cached;
-    // Nothing available — let the error surface naturally.
     return new Response(JSON.stringify({ error: 'offline' }), {
       status: 503,
       headers: { 'Content-Type': 'application/json' },
