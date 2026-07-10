@@ -19,9 +19,15 @@
   <link rel="manifest" href="data:application/manifest+json,%7B%22name%22%3A%22SchoolOS%22%2C%22short_name%22%3A%22SchoolOS%22%2C%22description%22%3A%22Ethiopian%20School%20Management%20System%22%2C%22start_url%22%3A%22%2F%22%2C%22display%22%3A%22standalone%22%2C%22orientation%22%3A%22portrait-primary%22%2C%22background_color%22%3A%22%231a3c5e%22%2C%22theme_color%22%3A%22%231a3c5e%22%2C%22lang%22%3A%22am%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22%2Ficon-192.png%22%2C%22sizes%22%3A%22192x192%22%2C%22type%22%3A%22image%2Fpng%22%2C%22purpose%22%3A%22any%20maskable%22%7D%2C%7B%22src%22%3A%22data%3Aimage%2Fsvg%2Bxml%2C%253Csvg%2520xmlns%253D%2527http%253A%252F%252Fwww.w3.org%252F2000%252Fsvg%2527%2520viewBox%253D%25270%25200%2520512%2520512%2527%253E%253Crect%2520width%253D%2527512%2527%2520height%253D%2527512%2527%2520rx%253D%2527128%2527%2520fill%253D%2527%25231a3c5e%2527%252F%253E%253Ctext%2520x%253D%2527256%2527%2520y%253D%2527345%2527%2520font-family%253D%2527system-ui%252CArial%252Csans-serif%2527%2520font-size%253D%2527220%2527%2520font-weight%253D%2527800%2527%2520text-anchor%253D%2527middle%2527%2520fill%253D%2527%2523c8a96e%2527%253ESO%253C%252Ftext%253E%253C%252Fsvg%253E%22%2C%22sizes%22%3A%22512x512%22%2C%22type%22%3A%22image%2Fsvg%2Bxml%22%2C%22purpose%22%3A%22any%20maskable%22%7D%5D%7D" />
 
   <title>SchoolOS</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <!-- Google Fonts (Inter) intentionally NOT loaded here.
+       A <link rel="stylesheet"> to fonts.googleapis.com blocks the browser
+       from painting ANY of this page — including the static header and
+       "Loading…" text below — until that request resolves. On Ethiopian
+       mobile data, requests to Google's font/CDN subdomains can hang
+       indefinitely with no error (they work fine over WiFi or VPN, which
+       is exactly the symptom that traced back to this line). The system
+       font stack in --font below requires zero network requests, so first
+       paint can never be blocked by a font again. -->
 
   <style>
     /* ════════════════════════════════════════════════════════════════════════
@@ -85,7 +91,9 @@
       --shadow-xl: 0 24px 64px rgba(0,0,0,0.18), 0 8px 24px rgba(0,0,0,0.10);
 
       /* ── TYPOGRAPHY ──────────────────────────────────────── */
-      --font: 'Inter', 'SF Pro Display', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      /* System font stack only — no web font, no network request. See the
+         comment above the removed Google Fonts <link> in <head> for why. */
+      --font: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, system-ui, sans-serif;
       --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 
       /* ── TYPE SCALE ──────────────────────────────────────── */
@@ -4804,45 +4812,126 @@
   <div id="budget-modal-mount"></div>
 
   <!-- ── Firebase v10 SDK (CDN, ES Module) ─────────────────────────────────── -->
-  <!-- ── TEMP DIAGNOSTICS — remove once the Acode loading issue is solved ──
-       No devtools console is available in Acode's preview, so this writes
-       any module-load error or auth/Firestore hang directly onto the page
-       (into #loading-text) so the failure is visible without a console.
+  <!-- ── BOOT FAILSAFE — last-resort visibility if the module below never
+       gets to run at all (e.g. a syntax error), or an error escapes its own
+       try/catch. Deliberately dependency-free: does not touch t(), store,
+       showToast, etc., since none of those are guaranteed to exist yet.
+       Normal SDK-load timeout/retry handling lives inside the module script
+       itself (see loadFirebaseSdk() below) — this is only the fallback for
+       the case that code never got a chance to run.
   ──────────────────────────────────────────────────────────────────────── -->
   <script>
-    window.addEventListener('error', function (e) {
+    window.__showBootError = function (detail) {
       var el = document.getElementById('loading-text');
-      if (el) el.textContent = 'DIAG ERROR: ' + (e.message || e.error || e);
+      if (!el) return;
+      el.innerHTML =
+        '<div style="text-align:center;padding:8px 0;">' +
+          '<p style="margin:0 0 14px;">Could not connect. Please check your internet connection and try again.</p>' +
+          '<button id="boot-retry-btn" type="button" style="padding:10px 22px;border-radius:6px;border:none;' +
+            'background:#1a3c5e;color:#fff;font-size:0.95rem;font-family:inherit;">Retry</button>' +
+          (detail ? '<p style="margin-top:14px;font-size:0.72rem;color:#8a99a8;word-break:break-word;">' +
+            String(detail).slice(0, 200).replace(/</g, '&lt;') + '</p>' : '') +
+        '</div>';
+      var btn = document.getElementById('boot-retry-btn');
+      if (btn) btn.onclick = function () { window.location.reload(); };
+    };
+    window.addEventListener('error', function (e) {
+      if (window.__schoolOsBooted) return; // app is already up — a later runtime error, not a boot failure
+      window.__showBootError((e.message || (e.error && e.error.message) || String(e.error || e)));
     });
     window.addEventListener('unhandledrejection', function (e) {
-      var el = document.getElementById('loading-text');
-      var msg = (e.reason && (e.reason.message || e.reason.code)) || e.reason || 'unknown';
-      if (el) el.textContent = 'DIAG REJECTION: ' + msg;
+      if (window.__schoolOsBooted) return;
+      var msg = (e.reason && (e.reason.message || e.reason.code)) || String(e.reason || 'Unknown error');
+      window.__showBootError(msg);
     });
-    // Watchdog: if nothing has replaced the loading text within 8s, the
-    // module script either never ran (blocked file:// module load) or a
-    // Firestore/Auth call is hanging silently with no error/rejection.
-    setTimeout(function () {
-      var el = document.getElementById('loading-text');
-      if (el && el.textContent.indexOf('Loading') !== -1) {
-        el.textContent = 'DIAG: still loading after 8s — module script likely did not run, or a network call to Firebase is hanging (no error thrown).';
-      }
-    }, 8000);
   </script>
 
   <script type="module">
-    import { initializeApp }                        from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-    import {
-      getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp,
-      collection, query, where, orderBy, getDocs, limit, writeBatch, Timestamp,
-      runTransaction, increment, arrayUnion,
-    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-    import {
-      getAuth, onAuthStateChanged,
-      signInWithEmailAndPassword,
-      createUserWithEmailAndPassword,
-      signOut as _firebaseSignOut,
-    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+    // ── FIREBASE SDK LOAD (resilient) ─────────────────────────────────────────
+    // These used to be static `import` statements pointed straight at
+    // gstatic.com. A static import gives the browser no way to time out or
+    // retry: if that network request hangs — which happens on Ethiopian
+    // mobile data even though the identical URL loads fine over VPN/WiFi —
+    // the module never finishes evaluating and the page is stuck on
+    // "Loading…" forever, with no error thrown and nothing the user can do.
+    //
+    // Fix: load each SDK piece with a dynamic import() raced against a
+    // timeout, retried once. sw.js also now runtime-caches these exact URLs
+    // after the first successful load (see sw.js, "Firebase SDK CDN files"),
+    // so every load after the very first one — online, offline, or on a bad
+    // connection — resolves instantly from cache and never touches
+    // gstatic.com again.
+    const FIREBASE_SDK_BASE   = "https://www.gstatic.com/firebasejs/10.12.2/";
+    const SDK_LOAD_TIMEOUT_MS = 12000;
+
+    function importWithTimeout(path, ms) {
+      return Promise.race([
+        import(FIREBASE_SDK_BASE + path),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Timed out loading ' + path)), ms)
+        ),
+      ]);
+    }
+
+    async function loadFirebaseSdk(attempt = 1) {
+      try {
+        const [appMod, fsMod, authMod] = await Promise.all([
+          importWithTimeout('firebase-app.js', SDK_LOAD_TIMEOUT_MS),
+          importWithTimeout('firebase-firestore.js', SDK_LOAD_TIMEOUT_MS),
+          importWithTimeout('firebase-auth.js', SDK_LOAD_TIMEOUT_MS),
+        ]);
+        return { appMod, fsMod, authMod };
+      } catch (err) {
+        if (attempt < 2) {
+          console.warn('[SchoolOS] Firebase SDK load failed, retrying once…', err.message);
+          return loadFirebaseSdk(attempt + 1);
+        }
+        throw err;
+      }
+    }
+
+    // Module-scope bindings for every SDK export the rest of this file uses.
+    // They start undefined and are populated by loadFirebaseSdk() below —
+    // nothing references them until after that succeeds (everything from
+    // here to the end of this <script> now runs inside bootSchoolOS(),
+    // which awaits the SDK load first), so this is equivalent to the old
+    // static imports for every existing call site further down the file.
+    let initializeApp, initializeFirestore, getFirestore, doc, getDoc, setDoc, updateDoc,
+        deleteDoc, onSnapshot, serverTimestamp, collection, query, where, orderBy, getDocs,
+        limit, writeBatch, Timestamp, runTransaction, increment, arrayUnion,
+        persistentLocalCache, persistentMultipleTabManager,
+        getAuth, onAuthStateChanged, signInWithEmailAndPassword,
+        createUserWithEmailAndPassword, _firebaseSignOut;
+    let app, db, auth;
+    // ── END FIREBASE SDK LOAD ───────────────────────────────────────────────
+
+
+    // Everything the app does — config, Firebase init, the DAL, every view,
+    // router, store, event wiring — lives inside this async function so
+    // none of it starts running until the SDK has actually loaded. Nothing
+    // below this line changed from before; it is the exact same code that
+    // used to execute at module top level, just gated behind the SDK load.
+    (async function bootSchoolOS() {
+      let sdk;
+      try {
+        sdk = await loadFirebaseSdk();
+      } catch (err) {
+        console.error('[SchoolOS] Firebase SDK failed to load:', err);
+        if (window.__showBootError) window.__showBootError(err.message);
+        return; // nothing below this point can work without the SDK — stop here.
+      }
+
+      ({ initializeApp } = sdk.appMod);
+      ({
+        initializeFirestore, getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc,
+        onSnapshot, serverTimestamp, collection, query, where, orderBy, getDocs, limit,
+        writeBatch, Timestamp, runTransaction, increment, arrayUnion,
+        persistentLocalCache, persistentMultipleTabManager,
+      } = sdk.fsMod);
+      ({
+        getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
+      } = sdk.authMod);
+      _firebaseSignOut = sdk.authMod.signOut;
 
     // ── CONFIG ──────────────────────────────────────────────────────────────
     // Firebase project credentials.
@@ -4878,9 +4967,27 @@
     // Initialise the Firebase app and expose the core service handles.
     // All other modules import { db, auth } from here via the module-scope
     // variables below – no secondary initializeApp() calls elsewhere.
-    const app  = initializeApp(FIREBASE_CONFIG);
-    const db   = getFirestore(app);
-    const auth = getAuth(app);
+    app  = initializeApp(FIREBASE_CONFIG);
+
+    // Offline persistence: cache reads to IndexedDB and queue writes locally
+    // while offline, then flush them to Firestore automatically as soon as
+    // the device is back online. This is what actually makes the app usable
+    // offline — caching the app shell (sw.js) only gets the UI to load; this
+    // is what makes real data survive a closed tab / app restart while
+    // offline and resync without any custom sync code once connectivity
+    // returns (built into the SDK). Falls back to the plain in-memory client
+    // if IndexedDB is unavailable (e.g. some private-browsing modes) so the
+    // app still works online even without persistence in that edge case.
+    try {
+      db = initializeFirestore(app, {
+        localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+      });
+    } catch (err) {
+      console.warn('[SchoolOS] Persistent offline cache unavailable, falling back to memory-only:', err.message);
+      db = getFirestore(app);
+    }
+
+    auth = getAuth(app);
     // ── END FIREBASE ─────────────────────────────────────────────────────────
 
 
@@ -25700,6 +25807,11 @@ service cloud.firestore {
       const missing = Object.keys(requiredGlobals).filter(k => !requiredGlobals[k]);
       if (missing.length === 0) {
         console.log(`[SchoolOS] ✅ SchoolOS initialized successfully (v${APP_VERSION})`);
+        // Disarms the boot-failsafe classic <script> at the top of the
+        // Firebase block: from this point on, errors are real runtime
+        // errors (handled by the boundary below via toasts), not boot
+        // failures, so they should no longer replace #loading-text.
+        window.__schoolOsBooted = true;
       } else {
         console.error('[SchoolOS] ❌ SchoolOS init incomplete — missing globals:', missing);
       }
@@ -25915,6 +26027,8 @@ service cloud.firestore {
     window.minifyInlineStrings = minifyInlineStrings;
     window.loadViewChunk       = loadViewChunk;
 
+    })(); // ── end bootSchoolOS() — see the Firebase SDK load block near the
+          //    top of this <script> for where this async function starts.
   </script>
 
   <!-- ════════════════════════════════════════════════════════════════════════
@@ -26101,12 +26215,18 @@ service cloud.firestore {
   </script>
 
   <!-- ════════════════════════════════════════════════════════════════════════
-       SERVICE WORKER — Offline caching strategy
-         • Firebase API calls (Firestore / Identity Toolkit) → Network-first
-           (always try the network; fall back to cache only if offline).
-         • Same-origin requests (this HTML file + any relative assets) →
-           Cache-first (serve from cache instantly; revalidate in background).
-         • Cross-origin non-Firebase requests → Network-only (pass through).
+       SERVICE WORKER — Offline caching strategy (see sw.js for the full,
+       commented implementation)
+         • HTML navigation (this file) → Network-first, cache fallback —
+           always the latest deploy when online, still usable offline.
+         • Firebase API calls (Firestore / Identity Toolkit — actual data) →
+           Network-first, cache fallback.
+         • Firebase SDK CDN files (gstatic.com/firebasejs — the SDK code) →
+           Cache-first. Version-pinned URLs, so once cached they're valid
+           forever; this is what stops a hung route to gstatic.com from
+           freezing the whole app after the very first successful load.
+         • Other same-origin requests (icons, manifest) → Cache-first.
+         • All other cross-origin requests → Network-only (pass through).
   ════════════════════════════════════════════════════════════════════════ -->
   <script>
     (function () {

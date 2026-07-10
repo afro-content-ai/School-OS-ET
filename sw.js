@@ -24,21 +24,51 @@
 // from cache-first navigation and the crash will appear to "come back" even
 // though the source on Netlify is already correct.
 //
-// v2.2 (this bump): evicts the cached index.html from before the mobile
-// nav fix — buildBottomNav() previously hard-sliced to the first 5 role
-// items with no way to reach the rest (e.g. Exam Schedule / Announcements
-// for teacher & student roles) short of switching to desktop view. Added a
-// hamburger + bottom-nav "More" entry that open the sidebar drawer, which
-// always lists the full, unsliced item set. Navigations already go
-// network-first (see below), so this bump isn't required for the new HTML
-// to load, but it forces the offline-fallback cache to refresh too and
-// triggers the "update available" banner for anyone with the PWA open.
-const CACHE_NAME = 'schoolos-v2.3';
+// v2.2: evicts the cached index.html from before the mobile nav fix —
+// buildBottomNav() previously hard-sliced to the first 5 role items with no
+// way to reach the rest (e.g. Exam Schedule / Announcements for teacher &
+// student roles) short of switching to desktop view. Added a hamburger +
+// bottom-nav "More" entry that open the sidebar drawer, which always lists
+// the full, unsliced item set. Navigations already go network-first (see
+// below), so this bump isn't required for the new HTML to load, but it
+// forces the offline-fallback cache to refresh too and triggers the
+// "update available" banner for anyone with the PWA open.
+//
+// v2.4 (this bump): adds FIREBASE_SDK_URLS below to the same cache-first
+// treatment as same-origin static assets (see rule 2b in the fetch handler).
+// Previously every cross-origin request — including the Firebase SDK's own
+// ES modules — was explicitly passed straight through to the network with
+// no caching at all (see the old rule 4 comment). That's fine for a fast,
+// reliable connection, but on Ethiopian mobile data a request to
+// www.gstatic.com can hang indefinitely with no error, and index.html has
+// no way to recover from that (see index.html's loadFirebaseSdk() for the
+// timeout/retry that handles the FIRST load). This bump makes every load
+// AFTER the first successful one immune to that entirely: once cached, the
+// SDK is served instantly from this cache and gstatic.com is never touched
+// again, online or offline. Bumping CACHE_NAME also means existing installs
+// pick up this new caching rule instead of running forever on the old SW
+// that never intercepted these requests.
+const CACHE_NAME = 'schoolos-v2.4';
 
-// The single HTML file we want available offline.
-const PRECACHE_URLS = ['/'];
+// Firebase JS SDK — version-pinned CDN URLs (the version number is in the
+// path), so whatever loaded successfully once is valid forever for that
+// version. Precached on install so even a very early visit (before the user
+// has actually signed in and triggered a Firestore call) picks these up;
+// also cache-first at runtime (see rule 2b) so the very first successful
+// load — from any client, any time — locks these in for every load after.
+const FIREBASE_SDK_URLS = [
+  'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js',
+  'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js',
+  'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js',
+];
 
-// Firebase API hostnames that always need a live network response.
+// The single HTML file we want available offline, plus the Firebase SDK
+// (see FIREBASE_SDK_URLS above).
+const PRECACHE_URLS = ['/', ...FIREBASE_SDK_URLS];
+
+// Firebase API hostnames that always need a live network response (actual
+// Firestore/Auth data calls — distinct from the SDK *code* above, which is
+// static and safe to cache).
 const FIREBASE_HOSTS = [
   'firestore.googleapis.com',
   'identitytoolkit.googleapis.com',
@@ -93,9 +123,19 @@ self.addEventListener('fetch', (event) => {
   // 1. Non-GET requests — always pass through to the network.
   if (request.method !== 'GET') return;
 
-  // 2. Firebase API calls — network-first, cache fallback.
+  // 2a. Firebase API calls (actual data) — network-first, cache fallback.
   if (FIREBASE_HOSTS.some((host) => url.hostname.includes(host))) {
     event.respondWith(networkFirst(request));
+    return;
+  }
+
+  // 2b. Firebase SDK CDN files (the code itself, not data) — cache-first.
+  //     Version-pinned URL, so once cached it's valid forever; this is what
+  //     stops a hung/blocked route to gstatic.com from freezing the whole
+  //     app on every load after the first (see index.html's loadFirebaseSdk
+  //     for how the first load itself is made resilient with a timeout).
+  if (url.hostname === 'www.gstatic.com' && url.pathname.startsWith('/firebasejs/')) {
+    event.respondWith(cacheFirst(request));
     return;
   }
 
